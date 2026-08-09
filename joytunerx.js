@@ -26,8 +26,18 @@
         exponent: 2.5        // Плавность: чем выше, тем точнее в центре и быстрее на краях
     };
     
-    // Списки для циклического перебора D-Pad
-    const HAM_BANDS =; 
+    // Списки для циклического перебора D-Pad (Частоты указаны в Гц)
+    const HAM_BANDS = [
+        { name: "160m", freq: 1840000 },  // Топ-бэнд (FT8 / SSB центр)
+        { name: "80m",  freq: 3600000 },  // НЧ Голос / Цифра
+        { name: "40m",  freq: 7100000 },  // Самый активный дневной/ночной диапазон
+        { name: "20m",  freq: 14200000 }, // Классический DX-диапазон (Старт по умолчанию)
+        { name: "15m",  freq: 21250000 }, // ВЧ диапазон
+        { name: "10m",  freq: 28400000 }, // Прохождение / Голос
+        { name: "2m",   freq: 14550000 }, // УКВ Вызывной в ЧМ/SSB
+        { name: "70cm", freq: 433500000 } // ДМВ Вызывной / Репитеры
+    ];
+
     const MODULATIONS = ["usb", "lsb", "cw", "am", "nfm"];
     
     let currentBandIndex = 3; // Старт по умолчанию с 14 МГц (20 метров)
@@ -329,18 +339,29 @@
         if (now - lastActiveTime > 250) {
 
             // КРЕСТОВИНА D-PAD: Переключение диапазонов и модуляций
-            if (gp.buttons[12]?.pressed) { // D-Pad Вверх
+            if (gp.buttons[12]?.pressed) { // D-Pad Вверх (Шаг вперед по диапазонам)
                 currentBandIndex = (currentBandIndex + 1) % HAM_BANDS.length;
-                if (typeof openwebrx.setFrequency === "function") openwebrx.setFrequency(HAM_BANDS[currentBandIndex]);
-                showOverlay("RADIO BAND", `${HAM_BANDS[currentBandIndex] / 1000000} MHz`);
+                const targetBand = HAM_BANDS[currentBandIndex];
+                
+                if (typeof openwebrx.setFrequency === "function") {
+                    openwebrx.setFrequency(targetBand.freq); // Передаем численные Герцы
+                }
+                // Выводим красивое человеческое название и частоту в МГц (МГц = Гц / 1 000 000)
+                showOverlay("RADIO BAND", `${targetBand.name} <br> <span style="color:#fff; font-size:18px;">(${(targetBand.freq / 1000000).toFixed(3)} MHz)</span>`);
                 lastActiveTime = now;
             }
-            if (gp.buttons[13]?.pressed) { // D-Pad Вниз
+
+            if (gp.buttons[13]?.pressed) { // D-Pad Вниз (Шаг назад по диапазонам)
                 currentBandIndex = (currentBandIndex - 1 + HAM_BANDS.length) % HAM_BANDS.length;
-                if (typeof openwebrx.setFrequency === "function") openwebrx.setFrequency(HAM_BANDS[currentBandIndex]);
-                showOverlay("RADIO BAND", `${HAM_BANDS[currentBandIndex] / 1000000} MHz`);
+                const targetBand = HAM_BANDS[currentBandIndex];
+                
+                if (typeof openwebrx.setFrequency === "function") {
+                    openwebrx.setFrequency(targetBand.freq); // Передаем численные Герцы
+                }
+                showOverlay("RADIO BAND", `${targetBand.name} <br> <span style="color:#fff; font-size:18px;">(${(targetBand.freq / 1000000).toFixed(3)} MHz)</span>`);
                 lastActiveTime = now;
             }
+
             if (gp.buttons[14]?.pressed) { // D-Pad Влево
                 currentModIndex = (currentModIndex - 1 + MODULATIONS.length) % MODULATIONS.length;
                 if (typeof openwebrx.setDemodulator === "function") openwebrx.setDemodulator(MODULATIONS[currentModIndex]);
