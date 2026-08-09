@@ -263,12 +263,20 @@
                 }
             }
 
-            // ↕ Вверх/Вниз: Масштаб водопада (Zoom работает независимо от VFO Lock)
-            if (Math.abs(rxStickY) > 0.6 && (now - lastZoomTime > 400)) {
-                if (rxStickY < -0.6 && typeof ui.zoomIn === "function") ui.zoomIn();
-                if (rxStickY > 0.6 && typeof ui.zoomOut === "function") ui.zoomOut();
-                lastZoomTime = now;
+            // ↕ Вверх/Вниз: Масштаб водопада (Zoom работает по таймеру, независимо от FPS)
+            const ZOOM_THRESHOLD = 0.6; // Порог отклонения для исключения случайного зума при кручении VFO
+            const ZOOM_COOLDOWN = 350;  // Интервал между шагами зума в мс (сделали чуть отзывчивее, 350мс вместо 400мс)
+            
+            if (Math.abs(rxStickY) > ZOOM_THRESHOLD && (now - lastZoomTime > ZOOM_COOLDOWN)) {
+                if (rxStickY < -ZOOM_THRESHOLD && typeof ui.zoomIn === "function") {
+                    ui.zoomIn();
+                    lastZoomTime = now;
+                } else if (rxStickY > ZOOM_THRESHOLD && typeof ui.zoomOut === "function") {
+                    ui.zoomOut();
+                    lastZoomTime = now;
+                }
             }
+
         }
 
         // =================================================================
