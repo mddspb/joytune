@@ -15,7 +15,17 @@
 
     // Новые флаги блокировок и фильтров (v1.7)
     let isVfoLocked = false;
-
+    
+    // Переменные для расчета честного Delta Time (независимость от FPS)
+    let lastFrameTime = performance.now();
+    
+    // Конфигурация экспоненциального валкодера JoyTuneRx
+    const VFO_CONFIG = {
+        deadzone: 0.15,      // Мертвая зона стика
+        maxSpeedHz: 250000,  // Максимальная скорость прокрутки (250 кГц/сек при полном отклонении)
+        exponent: 2.5        // Плавность: чем выше, тем точнее в центре и быстрее на краях
+    };
+    
     // Списки для циклического перебора D-Pad
     const HAM_BANDS =; 
     const MODULATIONS = ["usb", "lsb", "cw", "am", "nfm"];
@@ -58,10 +68,18 @@
         if (gamepadIndex === null) return;
         const gp = navigator.getGamepads()[gamepadIndex];
         if (!gp) return;
-
-        processInput(gp);
+    
+        // Расчет deltaTime в секундах (например, ~0.0166 для 60 FPS)
+        const now = performance.now();
+        const deltaTime = (now - lastFrameTime) / 1000;
+        lastFrameTime = now;
+    
+        // Передаем deltaTime в процессор ввода, чтобы скорость не зависела от FPS
+        processInput(gp, deltaTime);
+        
         requestAnimationFrame(startGamepadLoop);
     }
+
 
     // Всплывающее HUD-уведомление по центру экрана
     function showOverlay(title, value) {
@@ -90,7 +108,7 @@
         }
     }
 
-    function processInput(gp) {
+    function processInput(gp, deltaTime) { 
         const now = Date.now();
 
         // =================================================================
@@ -221,13 +239,21 @@
         } else {
             // [NORMAL] Обычный режим: ВАЛКОДЕР + ZOOM ВОДОПАДА
             
-            // ↔ Влево/Вправо: Валкодер (Изменение частоты разрешено только если VFO не заблокирован!)
-            if (Math.abs(rxStickX) > 0.15) {
+            // ↔ Влево/Вправо: Валкодер (Изменение частоты с экспоненциальным ускорением и привязкой к времени)
+            if (Math.abs(rxStickX) > VFO_CONFIG.deadzone) {
                 if (!isVfoLocked) {
                     const currentFreq = openwebrx.getFrequency();
-                    const currentStep = openwebrx.getStep() || 100;
-                    const speedFactor = Math.pow(Math.abs(rxStickX), 2) * 6;
-                    const freqOffset = Math.round((rxStickX > 0 ? 1 : -1) * currentStep * speedFactor);
+                    const sign = Math.sign(rxStickX);
+                    
+                    // Нормализуем значение оси с учетом мертвой зоны
+                    const normalizedInput = (Math.abs(rxStickX) - VFO_CONFIG.deadzone) / (1 - VFO_CONFIG.deadzone);
+                    
+                    // Применяем степенное ускорение (v1.6)
+                    const acceleratedFactor = Math.pow(normalizedInput, VFO_CONFIG.exponent);
+                    
+                    // Вычисляем сдвиг: Скорость * Ускорение * Время кадра
+                    const freqOffset = Math.round(sign * VFO_CONFIG.maxSpeedHz * acceleratedFactor * deltaTime);
+            
                     if (freqOffset !== 0 && typeof openwebrx.setFrequency === "function") {
                         openwebrx.setFrequency(currentFreq + freqOffset);
                     }
@@ -236,6 +262,7 @@
                     lastActiveTime = now;
                 }
             }
+
             // ↕ Вверх/Вниз: Масштаб водопада (Zoom работает независимо от VFO Lock)
             if (Math.abs(rxStickY) > 0.6 && (now - lastZoomTime > 400)) {
                 if (rxStickY < -0.6 && typeof ui.zoomIn === "function") ui.zoomIn();
