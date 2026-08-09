@@ -1,57 +1,90 @@
 /**
- * JoyTuneRx - OpenWebRX+ Gamepad Control Plugin v1.7
- * Layout: Cross-Handed Biomechanical Shift Mapping + Analog Triggers + Click Locks
+ * JoyTuneRx - OpenWebRX+ Gamepad Control Plugin v1.8
+ * Layout: Cross-Handed Biomechanical Shift Mapping + Momentary Triggers + Click Locks
  * Optimized for: Tablet + iPega PG-9023 (or Smartphone + Half-Gamepad)
  * Purpose: Hands-free SWL / SOTA / POTA Field Operations
+ *
+ * v1.8 fixes:
+ * - continuous controls use independent repeat timers, not a shared animation-frame debounce;
+ * - L2/R2 are safe when OWRX APIs are unavailable;
+ * - momentary overrides are restored on release, disconnect and plugin deactivation;
+ * - discrete buttons use rising-edge detection (no repeated toggles while held);
+ * - D-pad keeps deliberate auto-repeat;
+ * - animation delta is capped and reset on controller connection.
  */
 
 (function() {
     let gamepadIndex = null;
-    let lastActiveTime = 0;
-    let lastZoomTime = 0;
-    
-    // Глобальный флаг работы плагина (управляется кнопкой START)
-    let isPluginActive = true; 
+    let loopRunning = false;
 
-    // Новые флаги блокировок и фильтров (v1.7)
+    // Глобальный флаг работы плагина (управляется кнопкой START)
+    let isPluginActive = true;
+
+    // Блокировка валкодера
     let isVfoLocked = false;
-    
-    // Переменные для расчета честного Delta Time (независимость от FPS)
-    let lastFrameTime = performance.now();
-    
+
+    // Delta Time для VFO; сбрасывается при старте loop
+    let lastFrameTime = 0;
+
+    // Независимые таймеры для continuous controls.
+    // Это намеренно не один общий debounce: движения разных органов
+    // управления не должны блокировать друг друга.
+    const controlTimers = {
+        filter: 0,
+        gain: 0,
+        sqGate: 0,
+        sqHysteresis: 0,
+        nrThreshold: 0,
+        nrSmoothing: 0,
+        vfoLockNotice: 0,
+        zoom: 0,
+        dpad: 0
+    };
+
+    const REPEAT = {
+        filter: 100,
+        gain: 150,
+        sqGate: 100,
+        sqHysteresis: 100,
+        nrThreshold: 100,
+        nrSmoothing: 100,
+        vfoLockNotice: 500,
+        zoom: 350
+    };
+
+    // Состояние предыдущего кадра для edge-triggered кнопок.
+    const previousButtons = new Map();
+
     // Конфигурация экспоненциального валкодера JoyTuneRx
     const VFO_CONFIG = {
-        deadzone: 0.15,      // Мертвая зона стика
-        maxSpeedHz: 250000,  // Максимальная скорость прокрутки (250 кГц/сек при полном отклонении)
-        exponent: 2.5        // Плавность: чем выше, тем точнее в центре и быстрее на краях
+        deadzone: 0.15,
+        maxSpeedHz: 250000,
+        exponent: 2.5
     };
-    
-    // Списки для циклического перебора D-Pad (Частоты указаны в Гц)
+
     const HAM_BANDS = [
-        { name: "160m", freq: 1840000 },  // Топ-бэнд (FT8 / SSB центр)
-        { name: "80m",  freq: 3600000 },  // НЧ Голос / Цифра
-        { name: "40m",  freq: 7100000 },  // Самый активный дневной/ночной диапазон
-        { name: "20m",  freq: 14200000 }, // Классический DX-диапазон (Старт по умолчанию)
-        { name: "15m",  freq: 21250000 }, // ВЧ диапазон
-        { name: "10m",  freq: 28400000 }, // Прохождение / Голос
-        { name: "2m",   freq: 14550000 }, // УКВ Вызывной в ЧМ/SSB
-        { name: "70cm", freq: 433500000 } // ДМВ Вызывной / Репитеры
+        { name: "160m", freq: 1840000 },
+        { name: "80m",  freq: 3600000 },
+        { name: "40m",  freq: 7100000 },
+        { name: "20m",  freq: 14200000 },
+        { name: "15m",  freq: 21250000 },
+        { name: "10m",  freq: 28400000 },
+        { name: "2m",   freq: 145500000 },
+        { name: "70cm", freq: 433500000 }
     ];
 
     const MODULATIONS = ["usb", "lsb", "cw", "am", "nfm"];
-    
-    let currentBandIndex = 3; // Старт по умолчанию с 14 МГц (20 метров)
-    let currentModIndex = 0;  // Старт по умолчанию с USB
 
+    let currentBandIndex = 3;
+    let currentModIndex = 0;
     let overlayTimeout = null;
 
-    // Переменные памяти для возврата порогов после отпускания курков
+    // Память временных override'ов L2/R2.
     let baseSquelchOpen = null;
     let baseSquelchClose = null;
     let baseNrThreshold = null;
     let baseNrSmoothing = null;
 
-    // --- Инициализация HTML-оверлеев (HUD) в DOM ---
     const overlay = document.createElement('div');
     overlay.id = 'sdr-gamepad-overlay';
     overlay.style = `
@@ -64,343 +97,869 @@
     document.body.appendChild(overlay);
 
     window.addEventListener("gamepadconnected", (e) => {
-        console.log("SDR v1.7 Controller Connected:", e.gamepad.id);
+        console.log("JoyTuneRx v1.8 Controller Connected:", e.gamepad.id);
         gamepadIndex = e.gamepad.index;
+        previousButtons.clear();
+        lastFrameTime = performance.now();
         startGamepadLoop();
     });
 
-    window.addEventListener("gamepaddisconnected", () => {
-        console.log("SDR Controller Disconnected");
+    window.addEventListener("gamepaddisconnected", (e) => {
+        if (gamepadIndex !== null && e.gamepad.index !== gamepadIndex) return;
+
+        console.log("JoyTuneRx Controller Disconnected");
+        restoreMomentaryOverrides();
         gamepadIndex = null;
+        loopRunning = false;
+        previousButtons.clear();
     });
 
     function startGamepadLoop() {
-        if (gamepadIndex === null) return;
-        const gp = navigator.getGamepads()[gamepadIndex];
-        if (!gp) return;
-    
-        // Расчет deltaTime в секундах (например, ~0.0166 для 60 FPS)
-        const now = performance.now();
-        const deltaTime = (now - lastFrameTime) / 1000;
-        lastFrameTime = now;
-    
-        // Передаем deltaTime в процессор ввода, чтобы скорость не зависела от FPS
-        processInput(gp, deltaTime);
-        
-        requestAnimationFrame(startGamepadLoop);
+        if (loopRunning || gamepadIndex === null) return;
+
+        loopRunning = true;
+        lastFrameTime = performance.now();
+
+        requestAnimationFrame(gamepadLoop);
     }
 
+    function gamepadLoop() {
+        if (gamepadIndex === null) {
+            loopRunning = false;
+            return;
+        }
 
-    // Всплывающее HUD-уведомление по центру экрана
+        const gp = navigator.getGamepads()[gamepadIndex];
+
+        if (!gp) {
+            loopRunning = false;
+            return;
+        }
+
+        const now = performance.now();
+
+        // Защита от огромного скачка после suspend/background/reconnect.
+        const deltaTime = Math.min(
+            (now - lastFrameTime) / 1000,
+            0.05
+        );
+
+        lastFrameTime = now;
+
+        processInput(gp, deltaTime);
+
+        requestAnimationFrame(gamepadLoop);
+    }
+
     function showOverlay(title, value) {
-        overlay.innerHTML = `<span style="color:#888; font-size:14px;">${title}</span><br>${value}`;
+        overlay.innerHTML =
+            `<span style="color:#888; font-size:14px;">${title}</span><br>${value}`;
+
         overlay.style.display = 'block';
-        
-        if (overlayTimeout) clearTimeout(overlayTimeout);
+
+        if (overlayTimeout) {
+            clearTimeout(overlayTimeout);
+        }
+
         overlayTimeout = setTimeout(() => {
             overlay.style.display = 'none';
         }, 2200);
     }
 
-    // Сворачивание и разворачивание правой панели OpenWebRX+
     function toggleSidebar(show) {
-        const rightPanel = document.getElementById('openwebrx-side-panel') || document.querySelector('.openwebrx-panel');
-        const mainPanel = document.getElementById('openwebrx-main-container') || document.querySelector('.openwebrx-main');
-        
+        const rightPanel =
+            document.getElementById('openwebrx-side-panel') ||
+            document.querySelector('.openwebrx-panel');
+
+        const mainPanel =
+            document.getElementById('openwebrx-main-container') ||
+            document.querySelector('.openwebrx-main');
+
         if (rightPanel) {
-            if (show) {
-                rightPanel.style.display = 'block';
-                if (mainPanel) mainPanel.style.marginRight = ''; 
-            } else {
-                rightPanel.style.display = 'none';
-                if (mainPanel) mainPanel.style.marginRight = '0px'; 
+            rightPanel.style.display = show ? 'block' : 'none';
+
+            if (mainPanel) {
+                mainPanel.style.marginRight = show ? '' : '0px';
             }
         }
     }
 
-    function processInput(gp, deltaTime) { 
-        const now = Date.now();
+    function isMethod(name) {
+        return (
+            typeof window.openwebrx !== 'undefined' &&
+            typeof openwebrx[name] === 'function'
+        );
+    }
 
-        // =================================================================
-        // КНОПКА START (ID 9): Глобальный переключатель UI / Пауза плагина
-        // =================================================================
-        if (gp.buttons[9]?.pressed && (now - lastActiveTime > 400)) {
-            isPluginActive = !isPluginActive;
-            
-            if (isPluginActive) {
-                toggleSidebar(false); 
-                showOverlay("SYSTEM", "GAMEPAD INTERFACE ACTIVE<br><span style='font-size:14px; color:#ff0;'>SIDEBAR HIDDEN</span>");
-            } else {
-                toggleSidebar(true);  
-                showOverlay("SYSTEM", "<span style='color:#ff0000;'>GAMEPAD PAUSED</span><br><span style='font-size:14px; color:#fff;'>SIDEBAR RESTORED</span>");
-            }
-            lastActiveTime = now;
+    function getGamepadButton(gp, index) {
+        return gp.buttons[index] || {
+            pressed: false,
+            value: 0
+        };
+    }
+
+    function isPressed(gp, index) {
+        return !!getGamepadButton(gp, index).pressed;
+    }
+
+    function pressedEdge(gp, index) {
+        const pressed = isPressed(gp, index);
+        const wasPressed = previousButtons.get(index) === true;
+
+        return pressed && !wasPressed;
+    }
+
+    function updateButtonState(gp, index) {
+        previousButtons.set(index, isPressed(gp, index));
+    }
+
+    function shouldRepeat(name, now, interval) {
+        if (now - controlTimers[name] < interval) {
+            return false;
         }
 
-        // Если плагин временно деактивирован — блокируем чтение остальных кнопок
-        if (!isPluginActive) return;
+        controlTimers[name] = now;
+        return true;
+    }
 
-        // Модификаторы перекрестной логики (Бамперы и аналоговые Курки)
-        const l1Pressed = gp.buttons[4]?.pressed; // Левый бампер (L1)
-        const r1Pressed = gp.buttons[5]?.pressed; // Правый бампер (R1)
-        
-        const l2Button = gp.buttons[6]; // Левый курок (L2) - SQ Педаль
-        const r2Button = gp.buttons[7]; // Правый курок (R2) - NR Педаль
+    function resetControlTimers() {
+        for (const key of Object.keys(controlTimers)) {
+            controlTimers[key] = 0;
+        }
+    }
 
-        // Клики по стикам (v1.7)
-        const l3Pressed = gp.buttons[10]?.pressed; // Клик по левому стику
-        const r3Pressed = gp.buttons[11]?.pressed; // Клик по правому стику
+    // ================================================================
+    // MOMENTARY OVERRIDES: L2 / R2
+    // ================================================================
 
-        // Чтение аналоговых осей
-        const rxStickX = gp.axes[2] !== undefined ? gp.axes[2] : gp.axes[0]; // Правый стик
-        const rxStickY = gp.axes[3] !== undefined ? gp.axes[3] : gp.axes[1];
-        
-        const hasRightStick = gp.axes[2] !== undefined && gp.axes[3] !== undefined;
-        const lxStickX = hasRightStick ? gp.axes[0] : 0; // Левый стик
-        const lxStickY = hasRightStick ? gp.axes[1] : 0;
+    function applyL2Override(l2Value) {
+        if (
+            !isMethod('getSquelchOpenThreshold') ||
+            !isMethod('getSquelchCloseThreshold') ||
+            !isMethod('setSquelchThresholds')
+        ) {
+            return false;
+        }
 
-        // =================================================================
-        // АНАЛОГОВЫЕ КУРКИ (ПЕДАЛИ МГНОВЕННОГО ОТКРЫТИЯ ТРАКТА)
-        // =================================================================
-        
-        // 1. ЛЕВЫЙ КУРОК (L2): Временное понижение порогов SQ (Открытие эфира)
-        if (l2Button && l2Button.value > 0.05) {
-            if (baseSquelchOpen === null) {
-                baseSquelchOpen = openwebrx.getSquelchOpenThreshold();
-                baseSquelchClose = openwebrx.getSquelchCloseThreshold();
-            }
-            let sqDrop = Math.round(l2Button.value * 30); 
-            if (typeof openwebrx.setSquelchThresholds === "function") {
-                openwebrx.setSquelchThresholds(baseSquelchOpen - sqDrop, baseSquelchClose - sqDrop);
-            }
+        if (baseSquelchOpen === null) {
+            baseSquelchOpen =
+                openwebrx.getSquelchOpenThreshold();
+
+            baseSquelchClose =
+                openwebrx.getSquelchCloseThreshold();
+        }
+
+        const sqDrop = Math.round(l2Value * 30);
+
+        openwebrx.setSquelchThresholds(
+            baseSquelchOpen - sqDrop,
+            baseSquelchClose - sqDrop
+        );
+
+        return true;
+    }
+
+    function applyR2Override(r2Value) {
+        if (
+            !isMethod('getNrThreshold') ||
+            !isMethod('getNrSmoothing') ||
+            !isMethod('setNrParameters')
+        ) {
+            return false;
+        }
+
+        if (baseNrThreshold === null) {
+            baseNrThreshold =
+                openwebrx.getNrThreshold();
+
+            baseNrSmoothing =
+                openwebrx.getNrSmoothing();
+        }
+
+        const nrDrop = Math.round(r2Value * 20);
+
+        openwebrx.setNrParameters(
+            Math.max(0, baseNrThreshold - nrDrop),
+            baseNrSmoothing
+        );
+
+        return true;
+    }
+
+    function restoreMomentaryOverrides() {
+        if (
+            baseSquelchOpen !== null &&
+            isMethod('setSquelchThresholds')
+        ) {
+            openwebrx.setSquelchThresholds(
+                baseSquelchOpen,
+                baseSquelchClose
+            );
+        }
+
+        baseSquelchOpen = null;
+        baseSquelchClose = null;
+
+        if (
+            baseNrThreshold !== null &&
+            isMethod('setNrParameters')
+        ) {
+            openwebrx.setNrParameters(
+                baseNrThreshold,
+                baseNrSmoothing
+            );
+        }
+
+        baseNrThreshold = null;
+        baseNrSmoothing = null;
+    }
+
+    function processMomentaryTriggers(gp) {
+        const l2 = getGamepadButton(gp, 6);
+        const r2 = getGamepadButton(gp, 7);
+
+        // ------------------------------------------------------------
+        // L2 — temporary SQ override
+        // ------------------------------------------------------------
+        if (l2.value > 0.05) {
+            applyL2Override(l2.value);
         } else if (baseSquelchOpen !== null) {
-            if (typeof openwebrx.setSquelchThresholds === "function") {
-                openwebrx.setSquelchThresholds(baseSquelchOpen, baseSquelchClose);
+            if (isMethod('setSquelchThresholds')) {
+                openwebrx.setSquelchThresholds(
+                    baseSquelchOpen,
+                    baseSquelchClose
+                );
             }
-            baseSquelchOpen = null; baseSquelchClose = null;
+
+            baseSquelchOpen = null;
+            baseSquelchClose = null;
         }
 
-        // 2. ПРАВЫЙ КУРОК (R2): Временное понижение агрессивности NR
-        if (r2Button && r2Button.value > 0.05) {
-            if (baseNrThreshold === null) {
-                baseNrThreshold = openwebrx.getNrThreshold();
-                baseNrSmoothing = openwebrx.getNrSmoothing();
-            }
-            let nrDrop = Math.round(r2Button.value * 20); 
-            if (typeof openwebrx.setNrParameters === "function") {
-                openwebrx.setNrParameters(Math.max(0, baseNrThreshold - nrDrop), baseNrSmoothing);
-            }
+        // ------------------------------------------------------------
+        // R2 — temporary NR override
+        // ------------------------------------------------------------
+        if (r2.value > 0.05) {
+            applyR2Override(r2.value);
         } else if (baseNrThreshold !== null) {
-            if (typeof openwebrx.setNrParameters === "function") {
-                openwebrx.setNrParameters(baseNrThreshold, baseNrSmoothing);
+            if (isMethod('setNrParameters')) {
+                openwebrx.setNrParameters(
+                    baseNrThreshold,
+                    baseNrSmoothing
+                );
             }
-            baseNrThreshold = null; baseNrSmoothing = null;
+
+            baseNrThreshold = null;
+            baseNrSmoothing = null;
         }
+    }
 
-        // =================================================================
-        // КЛИКИ ПО СТИКАМ (VFO LOCK & NOTCH FILTER) (v1.7)
-        // =================================================================
-        if (now - lastActiveTime > 300) {
-            // Клик по правому стику (R3) -> Переключение блокировки валкодера частоты
-            if (r3Pressed) {
-                isVfoLocked = !isVfoLocked;
-                showOverlay("VFO DIAL", isVfoLocked ? "<span style='color:#ff0000;'>LOCKED</span>" : "<span style='color:#00ff00;'>UNLOCKED</span>");
-                lastActiveTime = now;
-            }
+    function deactivatePlugin() {
+        // Если L2/R2 были удержаны — сначала возвращаем исходное состояние.
+        restoreMomentaryOverrides();
 
-            // Клик по левому стику (L3) -> Включение/Выключение режекторного (Notch) фильтра
-            if (l3Pressed && hasRightStick) {
-                if (typeof openwebrx.toggleNotchFilter === "function") {
-                    openwebrx.toggleNotchFilter();
-                    showOverlay("NOTCH FILTER", "TOGGLED");
-                } else {
-                    showOverlay("NOTCH FILTER", "<span style='color:#ffaa00;'>NOT SUPPORTED BY SDR</span>");
-                }
-                lastActiveTime = now;
-            }
-        }
+        isPluginActive = false;
 
-        // =================================================================
-        // БЛОК ПРАВОГО СТИКА (НАВИГАЦИЯ ИЛИ УПРАВЛЕНИЕ SQUELCH / SQ)
-        // =================================================================
-        if (l1Pressed) {
-            // [SHIFT] Левая рука держит L1 -> Правая рука настраивает БАЗОВЫЙ ШУМОДАВ SQ
-            if (Math.abs(rxStickX) > 0.2 && (now - lastActiveTime > 100)) {
-                let currentOpen = openwebrx.getSquelchOpenThreshold();
-                let currentClose = openwebrx.getSquelchCloseThreshold();
-                const delta = (rxStickX > 0 ? 1 : -1) * 1;
-                if (typeof openwebrx.setSquelchThresholds === "function") {
-                    openwebrx.setSquelchThresholds(currentOpen + delta, currentClose + delta);
-                    showOverlay("BASE SQ GATE", `Open: ${currentOpen + delta}dB | Close: ${currentClose + delta}dB`);
-                }
-                lastActiveTime = now;
-            }
-            if (Math.abs(rxStickY) > 0.3 && (now - lastActiveTime > 100)) {
-                let currentOpen = openwebrx.getSquelchOpenThreshold();
-                let currentClose = openwebrx.getSquelchCloseThreshold();
-                const direction = rxStickY < 0 ? 1 : -1;
-                let newOpen = currentOpen + direction;
-                if (newOpen > currentClose && typeof openwebrx.setSquelchThresholds === "function") {
-                    openwebrx.setSquelchThresholds(newOpen, currentClose);
-                    showOverlay("BASE SQ HYSTERESIS", `Width: ${newOpen - currentClose} dB`);
-                }
-                lastActiveTime = now;
-            }
-        } else {
-            // [NORMAL] Обычный режим: ВАЛКОДЕР + ZOOM ВОДОПАДА
-            
-            // ↔ Влево/Вправо: Валкодер (Изменение частоты с экспоненциальным ускорением и привязкой к времени)
-            if (Math.abs(rxStickX) > VFO_CONFIG.deadzone) {
-                if (!isVfoLocked) {
-                    const currentFreq = openwebrx.getFrequency();
-                    const sign = Math.sign(rxStickX);
-                    
-                    // Нормализуем значение оси с учетом мертвой зоны
-                    const normalizedInput = (Math.abs(rxStickX) - VFO_CONFIG.deadzone) / (1 - VFO_CONFIG.deadzone);
-                    
-                    // Применяем степенное ускорение (v1.6)
-                    const acceleratedFactor = Math.pow(normalizedInput, VFO_CONFIG.exponent);
-                    
-                    // Вычисляем сдвиг: Скорость * Ускорение * Время кадра
-                    const freqOffset = Math.round(sign * VFO_CONFIG.maxSpeedHz * acceleratedFactor * deltaTime);
-            
-                    if (freqOffset !== 0 && typeof openwebrx.setFrequency === "function") {
-                        openwebrx.setFrequency(currentFreq + freqOffset);
-                    }
-                } else if (now - lastActiveTime > 500) {
-                    showOverlay("VFO LOCK", "<span style='color:#ff0000;'>DIAL LOCKED!</span>");
-                    lastActiveTime = now;
-                }
-            }
+        toggleSidebar(true);
 
-            // ↕ Вверх/Вниз: Масштаб водопада (Zoom работает по таймеру, независимо от FPS)
-            const ZOOM_THRESHOLD = 0.6; // Порог отклонения для исключения случайного зума при кручении VFO
-            const ZOOM_COOLDOWN = 350;  // Интервал между шагами зума в мс (сделали чуть отзывчивее, 350мс вместо 400мс)
-            
-            if (Math.abs(rxStickY) > ZOOM_THRESHOLD && (now - lastZoomTime > ZOOM_COOLDOWN)) {
-                if (rxStickY < -ZOOM_THRESHOLD && typeof ui.zoomIn === "function") {
-                    ui.zoomIn();
-                    lastZoomTime = now;
-                } else if (rxStickY > ZOOM_THRESHOLD && typeof ui.zoomOut === "function") {
-                    ui.zoomOut();
-                    lastZoomTime = now;
-                }
-            }
+        showOverlay(
+            "SYSTEM",
+            "<span style='color:#ff0000;'>GAMEPAD PAUSED</span><br>" +
+            "<span style='font-size:14px; color:#fff;'>SIDEBAR RESTORED</span>"
+        );
+    }
 
-        }
+    function activatePlugin() {
+        isPluginActive = true;
 
-        // =================================================================
-        // БЛОК ЛЕВОГО СТИКА (ФИЛЬТРЫ ИЛИ УПРАВЛЕНИЕ DIGITAL NR)
-        // =================================================================
-        if (hasRightStick) {
-            if (r1Pressed) {
-                // [SHIFT] Правая рука держит R1 -> Левая рука настраивает БАЗОВЫЙ DIGITAL NR
-                if (Math.abs(lxStickX) > 0.3 && (now - lastActiveTime > 100)) {
-                    let currentNrThresh = openwebrx.getNrThreshold();
-                    let currentNrSmooth = openwebrx.getNrSmoothing();
-                    const delta = (lxStickX > 0 ? 1 : -1) * 1;
-                    if (typeof openwebrx.setNrParameters === "function") {
-                        openwebrx.setNrParameters(currentNrThresh + delta, currentNrSmooth);
-                        showOverlay("BASE NR THRESHOLD", `Threshold: ${currentNrThresh + delta} | Smooth: ${currentNrSmooth}`);
-                    }
-                    lastActiveTime = now;
-                }
-                if (Math.abs(lxStickY) > 0.3 && (now - lastActiveTime > 100)) {
-                    let currentNrThresh = openwebrx.getNrThreshold();
-                    let currentNrSmooth = openwebrx.getNrSmoothing();
-                    const direction = lxStickY < 0 ? 1 : -1;
-                    let newSmooth = Math.max(0, currentNrSmooth + direction);
-                    if (typeof openwebrx.setNrParameters === "function") {
-                        openwebrx.setNrParameters(currentNrThresh, newSmooth);
-                        showOverlay("BASE NR SMOOTHING", `Smooth Level: ${newSmooth}`);
-                    }
-                    lastActiveTime = now;
-                }
+        resetControlTimers();
+
+        toggleSidebar(false);
+
+        showOverlay(
+            "SYSTEM",
+            "GAMEPAD INTERFACE ACTIVE<br>" +
+            "<span style='font-size:14px; color:#ff0;'>" +
+            "SIDEBAR HIDDEN</span>"
+        );
+    }
+
+    function processInput(gp, deltaTime) {
+        const now = performance.now();
+
+        // ============================================================
+        // START — rising edge only
+        // ============================================================
+
+        if (pressedEdge(gp, 9)) {
+            if (isPluginActive) {
+                deactivatePlugin();
             } else {
-                // [NORMAL] Обычный режим: ПОЛОСА ФИЛЬТРА + РЧ-УСИЛЕНИЕ (RF GAIN)
-                if (Math.abs(lxStickY) > 0.3 && (now - lastActiveTime > 100)) {
-                    let currentLow = openwebrx.getFilterLow(); let currentHigh = openwebrx.getFilterHigh();
-                    const delta = (lxStickY < 0 ? 1 : -1) * 50; let newHigh = currentHigh + delta;
-                    if (newHigh >= 1000 && newHigh <= 4000 && typeof openwebrx.setFilterMargins === "function") {
-                        openwebrx.setFilterMargins(currentLow, newHigh);
+                activatePlugin();
+            }
+        }
+
+        updateButtonState(gp, 9);
+
+        // Если интерфейс плагина отключен — больше ничего не обрабатываем.
+        if (!isPluginActive) {
+            return;
+        }
+
+        // ============================================================
+        // MOMENTARY TRIGGERS
+        // ============================================================
+
+        processMomentaryTriggers(gp);
+
+        // ============================================================
+        // AXES
+        // ============================================================
+
+        const rxStickX = gp.axes[2] || 0;
+        const rxStickY = gp.axes[3] || 0;
+        const lxStickX = gp.axes[0] || 0;
+        const lxStickY = gp.axes[1] || 0;
+
+        // Определяем наличие левого стика.
+        // Half-gamepad может иметь только один аналоговый стик.
+        const hasRightStick =
+            gp.axes.length >= 4;
+
+        // ============================================================
+        // BUMPERS
+        // ============================================================
+
+        const l1Pressed = isPressed(gp, 4);
+        const r1Pressed = isPressed(gp, 5);
+
+        // ============================================================
+        // RIGHT STICK — SQ shift or VFO + zoom
+        // ============================================================
+
+        if (l1Pressed) {
+
+            // --------------------------------------------------------
+            // L1 + Right Stick X — SQ gate
+            // --------------------------------------------------------
+
+            if (
+                Math.abs(rxStickX) > 0.2 &&
+                shouldRepeat('sqGate', now, REPEAT.sqGate)
+            ) {
+                if (
+                    isMethod('getSquelchOpenThreshold') &&
+                    isMethod('getSquelchCloseThreshold') &&
+                    isMethod('setSquelchThresholds')
+                ) {
+                    const currentOpen =
+                        openwebrx.getSquelchOpenThreshold();
+
+                    const currentClose =
+                        openwebrx.getSquelchCloseThreshold();
+
+                    const delta =
+                        rxStickX > 0 ? 1 : -1;
+
+                    openwebrx.setSquelchThresholds(
+                        currentOpen + delta,
+                        currentClose + delta
+                    );
+
+                    showOverlay(
+                        "BASE SQ GATE",
+                        `Open: ${currentOpen + delta}dB | ` +
+                        `Close: ${currentClose + delta}dB`
+                    );
+                }
+            }
+
+            // --------------------------------------------------------
+            // L1 + Right Stick Y — SQ hysteresis
+            // --------------------------------------------------------
+
+            if (
+                Math.abs(rxStickY) > 0.3 &&
+                shouldRepeat(
+                    'sqHysteresis',
+                    now,
+                    REPEAT.sqHysteresis
+                )
+            ) {
+                if (
+                    isMethod('getSquelchOpenThreshold') &&
+                    isMethod('getSquelchCloseThreshold') &&
+                    isMethod('setSquelchThresholds')
+                ) {
+                    const currentOpen =
+                        openwebrx.getSquelchOpenThreshold();
+
+                    const currentClose =
+                        openwebrx.getSquelchCloseThreshold();
+
+                    const direction =
+                        rxStickY < 0 ? 1 : -1;
+
+                    const newOpen =
+                        currentOpen + direction;
+
+                    if (newOpen > currentClose) {
+                        openwebrx.setSquelchThresholds(
+                            newOpen,
+                            currentClose
+                        );
+
+                        showOverlay(
+                            "BASE SQ HYSTERESIS",
+                            `Width: ${newOpen - currentClose} dB`
+                        );
                     }
                 }
-                if (Math.abs(lxStickX) > 0.4 && (now - lastActiveTime > 150)) {
-                    let currentGain = openwebrx.getRfGain ? openwebrx.getRfGain() : 20;
-                    let newGain = currentGain + (lxStickX > 0 ? 1 : -1);
-                    if (typeof openwebrx.setRfGain === "function") openwebrx.setRfGain(newGain);
+            }
+
+        } else {
+
+            // --------------------------------------------------------
+            // Right Stick X — VFO
+            // --------------------------------------------------------
+
+            if (Math.abs(rxStickX) > VFO_CONFIG.deadzone) {
+
+                if (
+                    !isVfoLocked &&
+                    isMethod('getFrequency') &&
+                    isMethod('setFrequency')
+                ) {
+                    const currentFreq =
+                        openwebrx.getFrequency();
+
+                    const sign =
+                        Math.sign(rxStickX);
+
+                    const normalizedInput =
+                        (
+                            Math.abs(rxStickX) -
+                            VFO_CONFIG.deadzone
+                        ) /
+                        (1 - VFO_CONFIG.deadzone);
+
+                    const acceleratedFactor =
+                        Math.pow(
+                            normalizedInput,
+                            VFO_CONFIG.exponent
+                        );
+
+                    const freqOffset =
+                        Math.round(
+                            sign *
+                            VFO_CONFIG.maxSpeedHz *
+                            acceleratedFactor *
+                            deltaTime
+                        );
+
+                    if (freqOffset !== 0) {
+                        openwebrx.setFrequency(
+                            currentFreq + freqOffset
+                        );
+                    }
+
+                } else if (
+                    isVfoLocked &&
+                    shouldRepeat(
+                        'vfoLockNotice',
+                        now,
+                        REPEAT.vfoLockNotice
+                    )
+                ) {
+                    showOverlay(
+                        "VFO LOCK",
+                        "<span style='color:#ff0000;'>" +
+                        "DIAL LOCKED!</span>"
+                    );
+                }
+            }
+
+            // --------------------------------------------------------
+            // Right Stick Y — waterfall zoom
+            // --------------------------------------------------------
+
+            const ZOOM_THRESHOLD = 0.6;
+
+            if (
+                Math.abs(rxStickY) > ZOOM_THRESHOLD &&
+                shouldRepeat('zoom', now, REPEAT.zoom)
+            ) {
+                if (
+                    rxStickY < -ZOOM_THRESHOLD &&
+                    typeof window.ui !== 'undefined' &&
+                    typeof ui.zoomIn === "function"
+                ) {
+                    ui.zoomIn();
+
+                } else if (
+                    rxStickY > ZOOM_THRESHOLD &&
+                    typeof window.ui !== 'undefined' &&
+                    typeof ui.zoomOut === "function"
+                ) {
+                    ui.zoomOut();
                 }
             }
         }
 
-        // =================================================================
-        // ДИСКРЕТНЫЕ ОПЕРАЦИИ (Крестовина и кнопки A, B, X, Y)
-        // =================================================================
-        if (now - lastActiveTime > 250) {
+        // ============================================================
+        // LEFT STICK — NR shift or filter + RF gain
+        // ============================================================
 
-            // КРЕСТОВИНА D-PAD: Переключение диапазонов и модуляций
-            if (gp.buttons[12]?.pressed) { // D-Pad Вверх (Шаг вперед по диапазонам)
-                currentBandIndex = (currentBandIndex + 1) % HAM_BANDS.length;
-                const targetBand = HAM_BANDS[currentBandIndex];
-                
-                if (typeof openwebrx.setFrequency === "function") {
-                    openwebrx.setFrequency(targetBand.freq); // Передаем численные Герцы
+        if (hasRightStick) {
+
+            if (r1Pressed) {
+
+                // ----------------------------------------------------
+                // R1 + Left Stick X — NR threshold
+                // ----------------------------------------------------
+
+                if (
+                    Math.abs(lxStickX) > 0.3 &&
+                    shouldRepeat(
+                        'nrThreshold',
+                        now,
+                        REPEAT.nrThreshold
+                    )
+                ) {
+                    if (
+                        isMethod('getNrThreshold') &&
+                        isMethod('getNrSmoothing') &&
+                        isMethod('setNrParameters')
+                    ) {
+                        const currentNrThresh =
+                            openwebrx.getNrThreshold();
+
+                        const currentNrSmooth =
+                            openwebrx.getNrSmoothing();
+
+                        const delta =
+                            lxStickX > 0 ? 1 : -1;
+
+                        openwebrx.setNrParameters(
+                            currentNrThresh + delta,
+                            currentNrSmooth
+                        );
+
+                        showOverlay(
+                            "BASE NR THRESHOLD",
+                            `Threshold: ${currentNrThresh + delta} | ` +
+                            `Smooth: ${currentNrSmooth}`
+                        );
+                    }
                 }
-                // Выводим красивое человеческое название и частоту в МГц (МГц = Гц / 1 000 000)
-                showOverlay("RADIO BAND", `${targetBand.name} <br> <span style="color:#fff; font-size:18px;">(${(targetBand.freq / 1000000).toFixed(3)} MHz)</span>`);
-                lastActiveTime = now;
-            }
 
-            if (gp.buttons[13]?.pressed) { // D-Pad Вниз (Шаг назад по диапазонам)
-                currentBandIndex = (currentBandIndex - 1 + HAM_BANDS.length) % HAM_BANDS.length;
-                const targetBand = HAM_BANDS[currentBandIndex];
-                
-                if (typeof openwebrx.setFrequency === "function") {
-                    openwebrx.setFrequency(targetBand.freq); // Передаем численные Герцы
+                // ----------------------------------------------------
+                // R1 + Left Stick Y — NR smoothing
+                // ----------------------------------------------------
+
+                if (
+                    Math.abs(lxStickY) > 0.3 &&
+                    shouldRepeat(
+                        'nrSmoothing',
+                        now,
+                        REPEAT.nrSmoothing
+                    )
+                ) {
+                    if (
+                        isMethod('getNrThreshold') &&
+                        isMethod('getNrSmoothing') &&
+                        isMethod('setNrParameters')
+                    ) {
+                        const currentNrThresh =
+                            openwebrx.getNrThreshold();
+
+                        const currentNrSmooth =
+                            openwebrx.getNrSmoothing();
+
+                        const direction =
+                            lxStickY < 0 ? 1 : -1;
+
+                        const newSmooth =
+                            Math.max(
+                                0,
+                                currentNrSmooth + direction
+                            );
+
+                        openwebrx.setNrParameters(
+                            currentNrThresh,
+                            newSmooth
+                        );
+
+                        showOverlay(
+                            "BASE NR SMOOTHING",
+                            `Smooth Level: ${newSmooth}`
+                        );
+                    }
                 }
-                showOverlay("RADIO BAND", `${targetBand.name} <br> <span style="color:#fff; font-size:18px;">(${(targetBand.freq / 1000000).toFixed(3)} MHz)</span>`);
-                lastActiveTime = now;
-            }
 
-            if (gp.buttons[14]?.pressed) { // D-Pad Влево
-                currentModIndex = (currentModIndex - 1 + MODULATIONS.length) % MODULATIONS.length;
-                if (typeof openwebrx.setDemodulator === "function") openwebrx.setDemodulator(MODULATIONS[currentModIndex]);
-                showOverlay("DEMODULATOR", MODULATIONS[currentModIndex].toUpperCase());
-                lastActiveTime = now;
-            }
-            if (gp.buttons[15]?.pressed) { // D-Pad Вправо
-                currentModIndex = (currentModIndex + 1) % MODULATIONS.length;
-                if (typeof openwebrx.setDemodulator === "function") openwebrx.setDemodulator(MODULATIONS[currentModIndex]);
-                showOverlay("DEMODULATOR", MODULATIONS[currentModIndex].toUpperCase());
-                lastActiveTime = now;
-            }
+            } else {
 
-            // КНОПКА SELECT (ID 8): Переключение режима AGC
-            if (gp.buttons[8]?.pressed) {
-                if (typeof openwebrx.toggleAgc === "function") {
-                    openwebrx.toggleAgc();
-                    showOverlay("RECEIVER AGC", "TOGGLED");
+                // ----------------------------------------------------
+                // Left Stick Y — filter high cutoff
+                // ----------------------------------------------------
+
+                if (
+                    Math.abs(lxStickY) > 0.3 &&
+                    shouldRepeat(
+                        'filter',
+                        now,
+                        REPEAT.filter
+                    )
+                ) {
+                    if (
+                        isMethod('getFilterLow') &&
+                        isMethod('getFilterHigh') &&
+                        isMethod('setFilterMargins')
+                    ) {
+                        const currentLow =
+                            openwebrx.getFilterLow();
+
+                        const currentHigh =
+                            openwebrx.getFilterHigh();
+
+                        const delta =
+                            (lxStickY < 0 ? 1 : -1) * 50;
+
+                        const newHigh =
+                            currentHigh + delta;
+
+                        if (
+                            newHigh >= 1000 &&
+                            newHigh <= 4000
+                        ) {
+                            openwebrx.setFilterMargins(
+                                currentLow,
+                                newHigh
+                            );
+
+                            showOverlay(
+                                "FILTER HIGH CUT",
+                                `${newHigh} Hz`
+                            );
+                        }
+                    }
                 }
-                lastActiveTime = now;
-            }
 
-            // ФРОНТАЛЬНЫЕ КНОПКИ ДЕЙСТВИЯ (A, B, X, Y)
-            if (gp.buttons[0]?.pressed) { // Кнопка A
-                if (typeof openwebrx.toggleSquelch === "function") openwebrx.toggleSquelch();
-                showOverlay("SQUELCH MUTE", "TOGGLED"); lastActiveTime = now;
-            }
-            if (gp.buttons[1]?.pressed) { // Кнопка B
-                if (typeof openwebrx.resetFilter === "function") openwebrx.resetFilter();
-                showOverlay("DSP FILTER", "RESET TO DEFAULT"); lastActiveTime = now;
-            }
-            if (gp.buttons[2]?.pressed) { // Кнопка X
-                if (typeof ui.centerWaterfall === "function") ui.centerWaterfall();
-                showOverlay("WATERFALL VIEW", "CENTERED"); lastActiveTime = now;
-            }
-            if (gp.buttons[3]?.pressed) { // Кнопка Y
-                if (typeof ui.addBookmark === "function") ui.addBookmark();
-                showOverlay("BOOKMARK MEMORY", "FREQUENCY SAVED"); lastActiveTime = now;
+                // ----------------------------------------------------
+                // Left Stick X — RF gain
+                // ----------------------------------------------------
+
+                if (
+                    Math.abs(lxStickX) > 0.4 &&
+                    shouldRepeat(
+                        'gain',
+                        now,
+                        REPEAT.gain
+                    )
+                ) {
+                    if (isMethod('setRfGain')) {
+
+                        const currentGain =
+                            isMethod('getRfGain')
+                                ? openwebrx.getRfGain()
+                                : 20;
+
+                        const newGain =
+                            currentGain +
+                            (lxStickX > 0 ? 1 : -1);
+
+                        openwebrx.setRfGain(newGain);
+
+                        showOverlay(
+                            "RF GAIN",
+                            `${newGain}`
+                        );
+                    }
+                }
             }
         }
+
+        // ============================================================
+        // D-PAD — deliberate auto-repeat
+        // ============================================================
+
+        const dpadRepeat = 250;
+
+        if (shouldRepeat('dpad', now, dpadRepeat)) {
+
+            // UP — next band
+            if (isPressed(gp, 12)) {
+
+                currentBandIndex =
+                    (currentBandIndex + 1) %
+                    HAM_BANDS.length;
+
+                const targetBand =
+                    HAM_BANDS[currentBandIndex];
+
+                if (isMethod('setFrequency')) {
+                    openwebrx.setFrequency(
+                        targetBand.freq
+                    );
+                }
+
+                showOverlay(
+                    "RADIO BAND",
+                    `${targetBand.name} <br>` +
+                    `<span style="color:#fff; font-size:18px;">` +
+                    `(${(targetBand.freq / 1000000).toFixed(3)} MHz)` +
+                    `</span>`
+                );
+
+            // DOWN — previous band
+            } else if (isPressed(gp, 13)) {
+
+                currentBandIndex =
+                    (
+                        currentBandIndex -
+                        1 +
+                        HAM_BANDS.length
+                    ) %
+                    HAM_BANDS.length;
+
+                const targetBand =
+                    HAM_BANDS[currentBandIndex];
+
+                if (isMethod('setFrequency')) {
+                    openwebrx.setFrequency(
+                        targetBand.freq
+                    );
+                }
+
+                showOverlay(
+                    "RADIO BAND",
+                    `${targetBand.name} <br>` +
+                    `<span style="color:#fff; font-size:18px;">` +
+                    `(${(targetBand.freq / 1000000).toFixed(3)} MHz)` +
+                    `</span>`
+                );
+
+            // LEFT — previous modulation
+            } else if (isPressed(gp, 14)) {
+
+                currentModIndex =
+                    (
+                        currentModIndex -
+                        1 +
+                        MODULATIONS.length
+                    ) %
+                    MODULATIONS.length;
+
+                if (isMethod('setDemodulator')) {
+                    openwebrx.setDemodulator(
+                        MODULATIONS[currentModIndex]
+                    );
+                }
+
+                showOverlay(
+                    "DEMODULATOR",
+                    MODULATIONS[currentModIndex].toUpperCase()
+                );
+
+            // RIGHT — next modulation
+            } else if (isPressed(gp, 15)) {
+
+                currentModIndex =
+                    (
+                        currentModIndex + 1
+                    ) %
+                    MODULATIONS.length;
+
+                if (isMethod('setDemodulator')) {
+                    openwebrx.setDemodulator(
+                        MODULATIONS[currentModIndex]
+                    );
+                }
+
+                showOverlay(
+                    "DEMODULATOR",
+                    MODULATIONS[currentModIndex].toUpperCase()
+                );
+            }
+        }
+
+        // ============================================================
+        // SELECT + A/B/X/Y — rising edge only
+        // ============================================================
+
+        // SELECT — AGC
+        if (pressedEdge(gp, 8)) {
+            if (isMethod('toggleAgc')) {
+                openwebrx.toggleAgc();
+
+                showOverlay(
+                    "RECEIVER AGC",
+                    "TOGGLED"
+                );
+            }
+        }
+
+        // A — Squelch
+        if (pressedEdge(gp, 0)) {
+            if (isMethod('toggleSquelch')) {
+                openwebrx.toggleSquelch();
+            }
+
+            showOverlay(
+                "SQUELCH MUTE",
+                "TOGGLED"
+            );
+        }
+
+        // B — Filter reset
+        if (pressedEdge(gp, 1)) {
+            if (isMethod('resetFilter')) {
+                openwebrx.resetFilter();
+            }
+
+            showOverlay(
+                "DSP FILTER",
+                "RESET TO DEFAULT"
+            );
+        }
+
+        // X — Center waterfall
+        if (pressedEdge(gp, 2)) {
+            if (
+                typeof window.ui !== 'undefined' &&
+                typeof ui.centerWaterfall === "function"
+            ) {
+                ui.centerWaterfall();
+            }
+
+            showOverlay(
+                "WATERFALL VIEW",
+                "CENTERED"
+            );
+        }
+
+        // Y — Add bookmark
+        if (pressedEdge(gp, 3)) {
+            if (
+                typeof window.ui !== 'undefined' &&
+                typeof ui.addBookmark === "function"
+            ) {
+                ui.addBookmark();
+            }
+
+            showOverlay(
+                "BOOKMARK MEMORY",
+                "FREQUENCY SAVED"
+            );
+        }
+
+        // Сохраняем состояние дискретных кнопок
+        // для следующего кадра.
+        [0, 1, 2, 3, 8].forEach(
+            index => updateButtonState(gp, index)
+        );
+
+        [12, 13, 14, 15].forEach(
+            index => updateButtonState(gp, index)
+        );
     }
 })();
