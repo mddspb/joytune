@@ -68,8 +68,8 @@ Triggers run on temporary state-memory architectures. They behave exactly like t
 ### 1. File Deployment
 Unpack the `.zip` archive. Place the unzipped folder structures inside your local installation storage layout:
 ```bash
-htdocs/plugins/receiver/joytune/joytune.js
-htdocs/plugins/receiver/joytune/init.js
+htdocs/plugins/receiver/joytunerx/joytunerx.js
+htdocs/plugins/receiver/joytunerx/init.js
 ```
 
 ### 2. Manual Activation Check
