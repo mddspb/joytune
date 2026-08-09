@@ -1,5 +1,5 @@
 /**
- * OpenWebRX+ Gamepad Control Plugin v1.7
+ * JoyTune - OpenWebRX+ Gamepad Control Plugin v1.7
  * Layout: Cross-Handed Biomechanical Shift Mapping + Analog Triggers + Click Locks
  * Optimized for: Tablet + iPega PG-9023 (or Smartphone + Half-Gamepad)
  * Purpose: Hands-free SWL / SOTA / POTA Field Operations
