@@ -779,16 +779,16 @@
         }
 
         // ============================================================
-        // D-PAD — deliberate auto-repeat 
+        // D-PAD — Умный deliberate auto-repeat (Фикс v1.8.3)
         // ============================================================
-        const dpadRepeat = 250;
-        const isAnyDpadPressed = [12, 13, 14, 15].some(btn => isPressed(gp, btn));
-    
+        const dpadRepeat = 250; 
+        const isAnyDpadPressed = [12, 13, 14, 15].some(index => isPressed(gp, index));
+        
         if (!isAnyDpadPressed) {
-            controlTimers.dpad = 0; // Сбрасываем таймер при отпускании кнопок
+            controlTimers.dpad = 0; // Сброс при отпускании
         } else if (now - controlTimers.dpad > dpadRepeat) {
-            controlTimers.dpad = now;
-    
+            controlTimers.dpad = now; 
+            
             // UP/DOWN — частота
             if (isPressed(gp, 12) || isPressed(gp, 13)) {
                 currentBandIndex = (currentBandIndex + (isPressed(gp, 12) ? 1 : -1) + HAM_BANDS.length) % HAM_BANDS.length;
