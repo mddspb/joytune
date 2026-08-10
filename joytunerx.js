@@ -1,5 +1,5 @@
 /**
- * JoyTuneRx - OpenWebRX+ Gamepad Control Plugin v1.9
+ * JoyTuneRx - OpenWebRX+ Gamepad Control Plugin
  * Layout: Cross-Handed Biomechanical Shift Mapping + Momentary Triggers + Click Locks
  * Optimized for: Tablet + gamedeck (or Smartphone + Gamepad)
  * Purpose: Hands-free SWL / SOTA / POTA Field Operations
