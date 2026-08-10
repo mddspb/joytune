@@ -15,7 +15,7 @@ Developed specifically for Short Wave Listeners (SWL) and radio amateurs perform
 
 ---
 
-## 🎮 Complete Control Map (v1.7)
+## 🎮 Complete Control Map 
 
 ### Standard Input Matrix (No Modifiers Held)
 
@@ -23,10 +23,10 @@ Developed specifically for Short Wave Listeners (SWL) and radio amateurs perform
 | :--- | :--- | :--- | :--- |
 | **Right Stick (X)** | Analog Axis | **VFO Main Dial** | Smooth frequency tuning. Features square-exponential speed acceleration. **Disabled if VFO Lock is ON**. |
 | **Right Stick (Y)** | Analog Axis | **Waterfall Zoom** | Up = Scales view closer (isolate peaks); Down = Pulls view back (wide overview). |
-| **Right Stick Click (R3)**| Click | **VFO Dial Lock** | **[NEW v1.7]** Safety toggle. Instantly locks/unlocks frequency dial to prevent accidental tuning. |
+| **Right Stick Click (R3)**| Click | **VFO Dial Lock** | Safety toggle. Instantly locks/unlocks frequency dial to prevent accidental tuning. |
 | **Left Stick (Y)*** | Analog Axis | **Filter Bandwidth** | Up/Down stretches/shrinks the DSP High Cutoff to isolate narrow signals. |
 | **Left Stick (X)*** | Analog Axis | **RF Sensitivity** | Left/Right overrides Automatic Gain Control to drop external noise floor. |
-| **Left Stick Click (L3)***| Click | **Notch Filter** | **[NEW v1.7]** Toggles the digital Notch Filter to cut narrow harmonic tones/whistles. |
+| **Left Stick Click (L3)***| Click | **Notch Filter** | Toggles the digital Notch Filter to cut narrow harmonic tones/whistles. |
 | **D-Pad Up / Down** | Click Button | **Band Stacking** | Quickly steps across HAM allocations (160m down to 70cm). Fires HUD display. |
 | **D-Pad Left / Right** | Click Button | **Mode Demodulator** | Swaps through main modes (USB, LSB, CW, AM, NFM). Fires HUD display. |
 | **Button A** | Click Button | **Squelch Toggle** | Instantly silences or opens static noise floor gates. |
