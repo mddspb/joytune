@@ -218,7 +218,8 @@
     }
 
     function isPressed(gp, index) {
-        return !!getGamepadButton(gp, index).pressed;
+        const b = getGamepadButton(gp, index);
+        return !!(b.pressed || (typeof b.value === 'number' && b.value > 0.05));
     }
 
     function pressedEdge(gp, index) {
