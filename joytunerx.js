@@ -1024,6 +1024,10 @@
         [12, 13, 14, 15].forEach(
             index => updateButtonState(gp, index)
         );
+        
+        [4,5,6,7].forEach(
+            index => updateButtonState(gp, index)
+        );
     }
 
     // Initial scan: if a controller is already connected before script load
