@@ -1,10 +1,8 @@
 /**
- * JoyTuneRx - OpenWebRX+ Gamepad Control Plugin v1.8
+ * JoyTuneRx - OpenWebRX+ Gamepad Control Plugin v1.9
  * Layout: Cross-Handed Biomechanical Shift Mapping + Momentary Triggers + Click Locks
- * Optimized for: Tablet + iPega PG-9023 (or Smartphone + Half-Gamepad)
+ * Optimized for: Tablet + gamedeck (or Smartphone + Gamepad)
  * Purpose: Hands-free SWL / SOTA / POTA Field Operations
- *
- * v1.8 fixes:
  * - continuous controls use independent repeat timers, not a shared animation-frame debounce;
  * - L2/R2 are safe when OWRX APIs are unavailable;
  * - momentary overrides are restored on release, disconnect and plugin deactivation;
@@ -104,7 +102,7 @@
         gamepadIndex = e.gamepad.index;
         previousButtons.clear();
         lastFrameTime = performance.now();
-        startGamepadLoop();
+        if (isPluginActive) startGamepadLoop();
     });
 
     window.addEventListener("gamepaddisconnected", (e) => {
@@ -120,7 +118,9 @@
         }
         previousButtons.clear();
     });
-
+    
+    window.addEventListener('beforeunload', () => { restoreMomentaryOverrides(); });
+    
     function startGamepadLoop() {
         if (loopRunning || gamepadIndex === null) return;
 
