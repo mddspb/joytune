@@ -17,6 +17,9 @@
     let gamepadIndex = null;
     let loopRunning = false;
 
+    // RAF id for proper cancelation of the loop
+    let rafId = null;
+
     // Глобальный флаг работы плагина (управляется кнопкой START)
     let isPluginActive = true;
 
@@ -111,6 +114,10 @@
         restoreMomentaryOverrides();
         gamepadIndex = null;
         loopRunning = false;
+        if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
         previousButtons.clear();
     });
 
@@ -120,12 +127,14 @@
         loopRunning = true;
         lastFrameTime = performance.now();
 
-        requestAnimationFrame(gamepadLoop);
+        rafId = requestAnimationFrame(gamepadLoop);
     }
 
     function gamepadLoop() {
-        if (gamepadIndex === null) {
+        // Если цикл остановлен явно — выходим и не планируем следующий кадр.
+        if (!loopRunning || gamepadIndex === null) {
             loopRunning = false;
+            rafId = null;
             return;
         }
 
@@ -133,6 +142,7 @@
 
         if (!gp) {
             loopRunning = false;
+            rafId = null;
             return;
         }
 
@@ -148,7 +158,7 @@
 
         processInput(gp, deltaTime);
 
-        requestAnimationFrame(gamepadLoop);
+        rafId = requestAnimationFrame(gamepadLoop);
     }
 
     function showOverlay(title, value) {
@@ -163,7 +173,16 @@
 
         overlayTimeout = setTimeout(() => {
             overlay.style.display = 'none';
+            overlayTimeout = null;
         }, 2200);
+    }
+
+    function hideOverlayImmediate() {
+        if (overlayTimeout) {
+            clearTimeout(overlayTimeout);
+            overlayTimeout = null;
+        }
+        overlay.style.display = 'none';
     }
 
     function toggleSidebar(show) {
@@ -359,7 +378,17 @@
 
         isPluginActive = false;
 
+        // Прекращаем цикл и отменяем rAF
+        loopRunning = false;
+        if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+        }
+
         toggleSidebar(true);
+
+        // Спрятать оверлей немедленно, чтобы не оставлять UI висеть
+        hideOverlayImmediate();
 
         showOverlay(
             "SYSTEM",
@@ -381,6 +410,11 @@
             "<span style='font-size:14px; color:#ff0;'>" +
             "SIDEBAR HIDDEN</span>"
         );
+
+        // Ensure the loop runs if a controller is connected
+        if (gamepadIndex !== null) {
+            startGamepadLoop();
+        }
     }
 
     function processInput(gp, deltaTime) {
@@ -779,34 +813,111 @@
         }
 
         // ============================================================
-        // D-PAD — Умный deliberate auto-repeat (Фикс v1.8.3)
+        // D-PAD — deliberate auto-repeat
         // ============================================================
-        const dpadRepeat = 250; 
-        const isAnyDpadPressed = [12, 13, 14, 15].some(index => isPressed(gp, index));
-        
-        if (!isAnyDpadPressed) {
-            controlTimers.dpad = 0; // Сброс при отпускании
-        } else if (now - controlTimers.dpad > dpadRepeat) {
-            controlTimers.dpad = now; 
-            
-            // UP/DOWN — частота
-            if (isPressed(gp, 12) || isPressed(gp, 13)) {
-                currentBandIndex = (currentBandIndex + (isPressed(gp, 12) ? 1 : -1) + HAM_BANDS.length) % HAM_BANDS.length;
-                const targetBand = HAM_BANDS[currentBandIndex];
-                if (isMethod('setFrequency')) openwebrx.setFrequency(targetBand.freq);
-                showOverlay("RADIO BAND", `${targetBand.name}<br>(${(targetBand.freq / 1e6).toFixed(3)} MHz)`);
-            }
-            // LEFT/RIGHT — модуляция
-            else if (isPressed(gp, 14) || isPressed(gp, 15)) {
-                currentModIndex = (currentModIndex + (isPressed(gp, 15) ? 1 : -1) + MODULATIONS.length) % MODULATIONS.length;
-                if (isMethod('setDemodulator')) openwebrx.setDemodulator(MODULATIONS[currentModIndex]);
-                showOverlay("DEMODULATOR", MODULATIONS[currentModIndex].toUpperCase());
+
+        const dpadRepeat = 250;
+
+        if (shouldRepeat('dpad', now, dpadRepeat)) {
+
+            // UP — next band
+            if (isPressed(gp, 12)) {
+
+                currentBandIndex =
+                    (currentBandIndex + 1) %
+                    HAM_BANDS.length;
+
+                const targetBand =
+                    HAM_BANDS[currentBandIndex];
+
+                if (isMethod('setFrequency')) {
+                    openwebrx.setFrequency(
+                        targetBand.freq
+                    );
+                }
+
+                showOverlay(
+                    "RADIO BAND",
+                    `${targetBand.name} <br>` +
+                    `<span style="color:#fff; font-size:18px;">` +
+                    `(${(targetBand.freq / 1000000).toFixed(3)} MHz)` +
+                    `</span>`
+                );
+
+            // DOWN — previous band
+            } else if (isPressed(gp, 13)) {
+
+                currentBandIndex =
+                    (
+                        currentBandIndex -
+                        1 +
+                        HAM_BANDS.length
+                    ) %
+                    HAM_BANDS.length;
+
+                const targetBand =
+                    HAM_BANDS[currentBandIndex];
+
+                if (isMethod('setFrequency')) {
+                    openwebrx.setFrequency(
+                        targetBand.freq
+                    );
+                }
+
+                showOverlay(
+                    "RADIO BAND",
+                    `${targetBand.name} <br>` +
+                    `<span style="color:#fff; font-size:18px;">` +
+                    `(${(targetBand.freq / 1000000).toFixed(3)} MHz)` +
+                    `</span>`
+                );
+
+            // LEFT — previous modulation
+            } else if (isPressed(gp, 14)) {
+
+                currentModIndex =
+                    (
+                        currentModIndex -
+                        1 +
+                        MODULATIONS.length
+                    ) %
+                    MODULATIONS.length;
+
+                if (isMethod('setDemodulator')) {
+                    openwebrx.setDemodulator(
+                        MODULATIONS[currentModIndex]
+                    );
+                }
+
+                showOverlay(
+                    "DEMODULATOR",
+                    MODULATIONS[currentModIndex].toUpperCase()
+                );
+
+            // RIGHT — next modulation
+            } else if (isPressed(gp, 15)) {
+
+                currentModIndex =
+                    (
+                        currentModIndex + 1
+                    ) %
+                    MODULATIONS.length;
+
+                if (isMethod('setDemodulator')) {
+                    openwebrx.setDemodulator(
+                        MODULATIONS[currentModIndex]
+                    );
+                }
+
+                showOverlay(
+                    "DEMODULATOR",
+                    MODULATIONS[currentModIndex].toUpperCase()
+                );
             }
         }
 
-
         // ============================================================
-        // SELECT + A/B/X/Y — rising edge only
+        // SELECT + A/B/X/Y + L3 + R3 — rising edge only
         // ============================================================
 
         // SELECT — AGC
@@ -875,9 +986,37 @@
             );
         }
 
+        // L3 — Left stick click — Notch toggle (rising edge)
+        if (pressedEdge(gp, 10)) {
+            if (isMethod('toggleNotch')) {
+                openwebrx.toggleNotch();
+            } else if (isMethod('toggleNotchFilter')) {
+                openwebrx.toggleNotchFilter();
+            } else {
+                console.warn('Notch toggle API not available (toggleNotch / toggleNotchFilter)');
+            }
+
+            showOverlay(
+                "NOTCH FILTER",
+                "TOGGLED"
+            );
+        }
+
+        // R3 — Right stick click — VFO lock (rising edge)
+        if (pressedEdge(gp, 11)) {
+            isVfoLocked = !isVfoLocked;
+
+            showOverlay(
+                "VFO LOCK",
+                isVfoLocked
+                    ? "<span style='color:#ff0000;'>LOCKED</span>"
+                    : "<span style='color:#00ff00;'>UNLOCKED</span>"
+            );
+        }
+
         // Сохраняем состояние дискретных кнопок
         // для следующего кадра.
-        [0, 1, 2, 3, 8].forEach(
+        [0, 1, 2, 3, 8, 9, 10, 11].forEach(
             index => updateButtonState(gp, index)
         );
 
@@ -885,4 +1024,22 @@
             index => updateButtonState(gp, index)
         );
     }
+
+    // Initial scan: if a controller is already connected before script load
+    (function initConnectedGamepad() {
+        if (!navigator.getGamepads) return;
+
+        const gps = navigator.getGamepads();
+        for (let i = 0; i < gps.length; i++) {
+            const g = gps[i];
+            if (g) {
+                console.log("JoyTuneRx found existing controller:", g.id);
+                gamepadIndex = g.index;
+                previousButtons.clear();
+                lastFrameTime = performance.now();
+                startGamepadLoop();
+                break;
+            }
+        }
+    })();
 })();
