@@ -779,108 +779,31 @@
         }
 
         // ============================================================
-        // D-PAD — deliberate auto-repeat
+        // D-PAD — deliberate auto-repeat 
         // ============================================================
-
         const dpadRepeat = 250;
-
-        if (shouldRepeat('dpad', now, dpadRepeat)) {
-
-            // UP — next band
-            if (isPressed(gp, 12)) {
-
-                currentBandIndex =
-                    (currentBandIndex + 1) %
-                    HAM_BANDS.length;
-
-                const targetBand =
-                    HAM_BANDS[currentBandIndex];
-
-                if (isMethod('setFrequency')) {
-                    openwebrx.setFrequency(
-                        targetBand.freq
-                    );
-                }
-
-                showOverlay(
-                    "RADIO BAND",
-                    `${targetBand.name} <br>` +
-                    `<span style="color:#fff; font-size:18px;">` +
-                    `(${(targetBand.freq / 1000000).toFixed(3)} MHz)` +
-                    `</span>`
-                );
-
-            // DOWN — previous band
-            } else if (isPressed(gp, 13)) {
-
-                currentBandIndex =
-                    (
-                        currentBandIndex -
-                        1 +
-                        HAM_BANDS.length
-                    ) %
-                    HAM_BANDS.length;
-
-                const targetBand =
-                    HAM_BANDS[currentBandIndex];
-
-                if (isMethod('setFrequency')) {
-                    openwebrx.setFrequency(
-                        targetBand.freq
-                    );
-                }
-
-                showOverlay(
-                    "RADIO BAND",
-                    `${targetBand.name} <br>` +
-                    `<span style="color:#fff; font-size:18px;">` +
-                    `(${(targetBand.freq / 1000000).toFixed(3)} MHz)` +
-                    `</span>`
-                );
-
-            // LEFT — previous modulation
-            } else if (isPressed(gp, 14)) {
-
-                currentModIndex =
-                    (
-                        currentModIndex -
-                        1 +
-                        MODULATIONS.length
-                    ) %
-                    MODULATIONS.length;
-
-                if (isMethod('setDemodulator')) {
-                    openwebrx.setDemodulator(
-                        MODULATIONS[currentModIndex]
-                    );
-                }
-
-                showOverlay(
-                    "DEMODULATOR",
-                    MODULATIONS[currentModIndex].toUpperCase()
-                );
-
-            // RIGHT — next modulation
-            } else if (isPressed(gp, 15)) {
-
-                currentModIndex =
-                    (
-                        currentModIndex + 1
-                    ) %
-                    MODULATIONS.length;
-
-                if (isMethod('setDemodulator')) {
-                    openwebrx.setDemodulator(
-                        MODULATIONS[currentModIndex]
-                    );
-                }
-
-                showOverlay(
-                    "DEMODULATOR",
-                    MODULATIONS[currentModIndex].toUpperCase()
-                );
+        const isAnyDpadPressed = [12, 13, 14, 15].some(btn => isPressed(gp, btn));
+    
+        if (!isAnyDpadPressed) {
+            controlTimers.dpad = 0; // Сбрасываем таймер при отпускании кнопок
+        } else if (now - controlTimers.dpad > dpadRepeat) {
+            controlTimers.dpad = now;
+    
+            // UP/DOWN — частота
+            if (isPressed(gp, 12) || isPressed(gp, 13)) {
+                currentBandIndex = (currentBandIndex + (isPressed(gp, 12) ? 1 : -1) + HAM_BANDS.length) % HAM_BANDS.length;
+                const targetBand = HAM_BANDS[currentBandIndex];
+                if (isMethod('setFrequency')) openwebrx.setFrequency(targetBand.freq);
+                showOverlay("RADIO BAND", `${targetBand.name}<br>(${(targetBand.freq / 1e6).toFixed(3)} MHz)`);
+            }
+            // LEFT/RIGHT — модуляция
+            else if (isPressed(gp, 14) || isPressed(gp, 15)) {
+                currentModIndex = (currentModIndex + (isPressed(gp, 15) ? 1 : -1) + MODULATIONS.length) % MODULATIONS.length;
+                if (isMethod('setDemodulator')) openwebrx.setDemodulator(MODULATIONS[currentModIndex]);
+                showOverlay("DEMODULATOR", MODULATIONS[currentModIndex].toUpperCase());
             }
         }
+
 
         // ============================================================
         // SELECT + A/B/X/Y — rising edge only
