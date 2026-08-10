@@ -206,7 +206,7 @@
     function isMethod(name) {
         return (
             typeof window.openwebrx !== 'undefined' &&
-            typeof openwebrx[name] === 'function'
+            (typeof openwebrx[name] === 'function' || typeof openwebrx[name] !== 'undefined')
         );
     }
 
